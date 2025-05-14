@@ -71,3 +71,70 @@
 
 (define-data-var next-loan-id uint u0)
 (define-data-var total-stx-locked uint u0)
+
+;; User Management Functions
+
+;; Initialize a new user's credit score
+;; Creates a credit profile for a new user with the minimum score
+(define-public (initialize-score)
+  (let ((sender tx-sender))
+    (asserts! (is-none (map-get? UserScores { user: sender })) ERR-UNAUTHORIZED)
+    (ok (map-set UserScores { user: sender } {
+      score: MIN-SCORE,
+      total-borrowed: u0,
+      total-repaid: u0,
+      loans-taken: u0,
+      loans-repaid: u0,
+      last-update: stacks-block-height,
+    }))
+  )
+)
+
+;; Loan Functions
+
+;; Request a new loan
+;; Allows a user to request a loan with required collateral based on their credit score
+(define-public (request-loan
+    (amount uint)
+    (collateral uint)
+    (duration uint)
+  )
+  (let (
+      (sender tx-sender)
+      (loan-id (+ (var-get next-loan-id) u1))
+      (user-score (unwrap! (map-get? UserScores { user: sender }) ERR-UNAUTHORIZED))
+      (active-loans (default-to { active-loans: (list) } (map-get? UserLoans { user: sender })))
+    )
+    ;; Validate request
+    (asserts! (>= (get score user-score) MIN-LOAN-SCORE) ERR-INSUFFICIENT-SCORE)
+    (asserts! (<= (len (get active-loans active-loans)) u5) ERR-ACTIVE-LOAN)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (and (> duration u0) (<= duration u52560)) ERR-INVALID-DURATION)
+    ;; Max ~1 year assuming 10-min blocks
+    ;; Calculate required collateral based on credit score
+    (let ((required-collateral (calculate-required-collateral amount (get score user-score))))
+      (asserts! (>= collateral required-collateral) ERR-INSUFFICIENT-BALANCE)
+      ;; Transfer collateral
+      (try! (stx-transfer? collateral sender (as-contract tx-sender)))
+      ;; Create loan
+      (map-set Loans { loan-id: loan-id } {
+        borrower: sender,
+        amount: amount,
+        collateral: collateral,
+        due-height: (+ stacks-block-height duration),
+        interest-rate: (calculate-interest-rate (get score user-score)),
+        is-active: true,
+        is-defaulted: false,
+        repaid-amount: u0,
+      })
+      ;; Update user loans
+      (try! (update-user-loans sender loan-id))
+      ;; Transfer loan amount
+      (as-contract (try! (stx-transfer? amount tx-sender sender)))
+      ;; Update counters
+      (var-set next-loan-id loan-id)
+      (var-set total-stx-locked (+ (var-get total-stx-locked) collateral))
+      (ok loan-id)
+    )
+  )
+)
