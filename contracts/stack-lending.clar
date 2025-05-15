@@ -138,3 +138,85 @@
     )
   )
 )
+
+;; Repay an active loan
+;; Allows a borrower to repay their loan, fully or partially
+(define-public (repay-loan
+    (loan-id uint)
+    (amount uint)
+  )
+  (let (
+      (sender tx-sender)
+      (loan (unwrap! (map-get? Loans { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+    )
+    (asserts! (is-eq sender (get borrower loan)) ERR-UNAUTHORIZED)
+    (asserts! (get is-active loan) ERR-LOAN-NOT-FOUND)
+    (asserts! (not (get is-defaulted loan)) ERR-LOAN-DEFAULTED)
+    (asserts! (<= loan-id (var-get next-loan-id)) ERR-INVALID-LOAN-ID)
+    ;; Calculate total amount due
+    (let ((total-due (calculate-total-due loan)))
+      (asserts! (>= amount u0) ERR-INVALID-AMOUNT)
+      ;; Transfer repayment
+      (try! (stx-transfer? amount sender (as-contract tx-sender)))
+      ;; Update loan
+      (let ((new-repaid-amount (+ (get repaid-amount loan) amount)))
+        (map-set Loans { loan-id: loan-id }
+          (merge loan {
+            repaid-amount: new-repaid-amount,
+            is-active: (< new-repaid-amount total-due),
+          })
+        )
+        ;; If loan fully repaid, update score and return collateral
+        (if (>= new-repaid-amount total-due)
+          (begin
+            (try! (update-credit-score sender true loan))
+            (as-contract (try! (stx-transfer? (get collateral loan) tx-sender sender)))
+            (var-set total-stx-locked
+              (- (var-get total-stx-locked) (get collateral loan))
+            )
+          )
+          true
+        )
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Helper Functions
+
+;; Calculate collateral requirements based on credit score
+;; Determines the collateral needed based on the user's credit score
+(define-private (calculate-required-collateral
+    (amount uint)
+    (score uint)
+  )
+  (let ((collateral-ratio (- u100 (/ (* score u50) u100))))
+    (/ (* amount collateral-ratio) u100)
+  )
+)
+
+;; Calculate interest rate based on credit score
+;; Determines the interest rate percentage based on the user's credit score
+(define-private (calculate-interest-rate (score uint))
+  (let ((base-rate u10))
+    (- base-rate (/ (* score u5) u100))
+  )
+)
+
+;; Calculate the total amount due including interest
+;; Calculates the total amount due for a loan including interest
+(define-private (calculate-total-due (loan {
+  borrower: principal,
+  amount: uint,
+  collateral: uint,
+  due-height: uint,
+  interest-rate: uint,
+  is-active: bool,
+  is-defaulted: bool,
+  repaid-amount: uint,
+}))
+  (let ((interest (* (get amount loan) (get interest-rate loan))))
+    (+ (get amount loan) (/ interest u100))
+  )
+)
