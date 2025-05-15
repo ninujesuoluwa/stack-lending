@@ -220,3 +220,110 @@
     (+ (get amount loan) (/ interest u100))
   )
 )
+
+;; Update a user's credit score based on loan repayment
+;; Adjusts a user's credit score based on loan repayment success
+(define-private (update-credit-score
+    (user principal)
+    (success bool)
+    (loan {
+      borrower: principal,
+      amount: uint,
+      collateral: uint,
+      due-height: uint,
+      interest-rate: uint,
+      is-active: bool,
+      is-defaulted: bool,
+      repaid-amount: uint,
+    })
+  )
+  (let (
+      (current-score (unwrap! (map-get? UserScores { user: user }) ERR-UNAUTHORIZED))
+      (new-score (if success
+        (if (<= (+ (get score current-score) u2) MAX-SCORE)
+          (+ (get score current-score) u2)
+          MAX-SCORE
+        )
+        (if (>= (- (get score current-score) u10) MIN-SCORE)
+          (- (get score current-score) u10)
+          MIN-SCORE
+        )
+      ))
+    )
+    (if success
+      (map-set UserScores { user: user }
+        (merge current-score {
+          score: new-score,
+          total-repaid: (+ (get total-repaid current-score) (get amount loan)),
+          loans-repaid: (+ (get loans-repaid current-score) u1),
+          last-update: stacks-block-height,
+        })
+      )
+      (map-set UserScores { user: user }
+        (merge current-score {
+          score: new-score,
+          last-update: stacks-block-height,
+        })
+      )
+    )
+    (ok true)
+  )
+)
+
+;; Update the list of a user's active loans
+;; Adds a new loan ID to a user's active loans list
+(define-private (update-user-loans
+    (user principal)
+    (loan-id uint)
+  )
+  (let ((user-loans (default-to { active-loans: (list) } (map-get? UserLoans { user: user }))))
+    (map-set UserLoans { user: user } { active-loans: (unwrap! (as-max-len? (append (get active-loans user-loans) loan-id) u20)
+      ERR-ACTIVE-LOAN
+    ) }
+    )
+    (ok true)
+  )
+)
+
+;; Read-only Functions
+
+;; Get a user's current credit score and loan history
+;; Returns a user's credit score and loan history data
+(define-read-only (get-user-score (user principal))
+  (map-get? UserScores { user: user })
+)
+
+;; Get details of a specific loan
+;; Returns the details of a loan by ID
+(define-read-only (get-loan (loan-id uint))
+  (map-get? Loans { loan-id: loan-id })
+)
+
+;; Get a user's active loans
+;; Returns a list of a user's active loan IDs
+(define-read-only (get-user-active-loans (user principal))
+  (map-get? UserLoans { user: user })
+)
+
+;; Admin Functions
+
+;; Mark a loan as defaulted when past due date
+;; Allows the contract owner to mark a loan as defaulted when it's past due
+(define-public (mark-loan-defaulted (loan-id uint))
+  (let ((loan (unwrap! (map-get? Loans { loan-id: loan-id }) ERR-LOAN-NOT-FOUND)))
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= stacks-block-height (get due-height loan)) ERR-NOT-DUE)
+    (asserts! (get is-active loan) ERR-LOAN-NOT-FOUND)
+    (asserts! (<= loan-id (var-get next-loan-id)) ERR-INVALID-LOAN-ID)
+    ;; Update loan status
+    (map-set Loans { loan-id: loan-id }
+      (merge loan {
+        is-defaulted: true,
+        is-active: false,
+      })
+    )
+    ;; Update credit score
+    (try! (update-credit-score (get borrower loan) false loan))
+    (ok true)
+  )
+)
